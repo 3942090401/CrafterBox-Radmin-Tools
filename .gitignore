@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+.venv/
+
+# 构建产物
+dist/
+src-tauri/target/
+src-tauri/gen/
+portable/
+gen_pages/
+
+# 本地数据 / 调试产物（含真实网络信息，勿提交）
+public/snapshot.json
+preview-radmin.html
+.workbuddy/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

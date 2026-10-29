@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CrafterBox</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="title-bar" data-tauri-drag-region>
+      <span class="title" data-tauri-drag-region id="app-title">CrafterBox</span>
+      <div class="window-btns">
+        <button id="btn-min" class="win-btn min" title="Minimize"></button>
+        <button id="btn-close" class="win-btn close" title="Close"></button>
+      </div>
+    </header>
+
+    <nav class="tab-bar">
+      <button class="tab active" data-tab="info">信息</button>
+      <button class="tab" data-tab="account">账号</button><button class="tab" data-tab="lan">LAN</button>
+      <button class="tab" data-tab="options">选项</button>
+      <button class="tab" data-tab="about">关于</button>
+    </nav>
+
+    <main id="page-container">
+      <aside id="sub-nav" class="sub-nav"></aside>
+      <div id="content-area" class="content-area"></div>
+    </main>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
