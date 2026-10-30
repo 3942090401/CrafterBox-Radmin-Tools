@@ -47,6 +47,21 @@ export async function render(container) {
     })[character]);
   }
 
+  /** 网卡可能返回多个 IPv6（含 fe80 链路本地），优先取全局地址 */
+  function pickIpv6(raw) {
+    const list = String(raw || "")
+      .split(",")
+      .map(item => item.trim())
+      .filter(item => item.includes(":"));
+    if (list.length === 0) return "";
+    return list.find(item => !item.toLowerCase().startsWith("fe80")) || list[0];
+  }
+
+  function pickIpv4(raw) {
+    const text = String(raw || "").trim();
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(text) ? text : "";
+  }
+
   async function refreshAccounts() {
     accounts = await invoke("get_accounts");
     renderAccounts();
@@ -61,7 +76,8 @@ export async function render(container) {
       <div class="account-card" title="${escapeHtml(`名字：${account.alias}\nIPv4：${account.ipv4}\nIPv6：${account.ipv6 || ""}\nRID：${account.rid}`)}">
         <div class="acc-info">
           <div class="acc-name">${escapeHtml(account.alias)}</div>
-          <div class="acc-meta">RID: ${escapeHtml(account.rid)} | IP: ${escapeHtml(account.ipv4)}</div>
+          <div class="acc-meta">RID: ${escapeHtml(account.rid)} | IPv4: ${escapeHtml(account.ipv4 || "—")}</div>
+          <div class="acc-meta acc-meta-v6">IPv6: ${escapeHtml(account.ipv6 || "—")}</div>
         </div>
         <div class="acc-actions">
           <button data-action="apply-account" data-index="${index}" ${account.ServerPassword?.length ? "" : "disabled"}>切换</button>
@@ -89,7 +105,7 @@ export async function render(container) {
       switch (button.dataset.action) {
         case "apply-account":
           await invoke("apply_account", { account });
-          toast(`已切换到 ${account.alias}`);
+          toast(`已切换到 ${account.alias}（IPv4 ${account.ipv4 || "—"} / IPv6 ${account.ipv6 || "—"}）`, "success", 3000);
           break;
         case "rename-account": {
           const name = await promptDialog("请输入新的账号名称：", account.alias, "重命名");
@@ -130,16 +146,17 @@ export async function render(container) {
       const info = await invoke("get_radmin_info");
       const name = await promptDialog("请输入账号名称：", info.alias || `账号_${info.rid}`, "保存当前账号");
       if (!name?.trim()) return;
-      const ipv6 = await invoke("get_current_ipv6");
+      const ipv6 = pickIpv6(await invoke("get_current_ipv6"));
+      const ipv4 = pickIpv4(info.ip);
       accounts.push({
         alias: name.trim(),
-        ipv4: info.ip,
+        ipv4,
         ipv6,
         rid: info.rid,
         ServerPassword: info.password
       });
       await saveAccounts();
-      toast("当前账号已保存");
+      toast(`当前账号已保存（IPv4 ${ipv4 || "—"} / IPv6 ${ipv6 || "—"}）`);
     } catch (error) {
       toast(`保存账号失败：${error}`, "error", 3600);
     }

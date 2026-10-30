@@ -102,6 +102,7 @@ pub fn run() {
             commands::rename_account_profile,
             commands::move_account_profile,
             commands::open_account_config_folder,
+            commands::join_minecraft_networks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

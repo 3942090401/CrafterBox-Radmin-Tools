@@ -59,6 +59,8 @@ const F_SERVICE_PORT: u16 = 0x0330;
 const F_ENDPOINT_TEXT: u16 = 0x01e9;
 const F_ENDPOINT_HOST: u16 = 0x01c2;
 const F_ENDPOINT_PORT: u16 = 0x01c3;
+/// 通道类型：0 = TCP、2 = UDP、3 = TCP 中继、4 = UDP
+const F_SESSION_CHANNEL: u16 = 0x01e8;
 
 // ===== 命令 =====
 const CMD_JOIN_NETWORK: u32 = 3;
@@ -77,6 +79,7 @@ pub struct RadminPeer {
     /// 虚拟网段前缀长度：Radmin VPN 的网段是 26.0.0.0/8
     pub ipv4_prefix: Option<u8>,
     pub ipv6: Option<String>,
+    /// `0x01c9`：云端节点地址（Radmin 服务器，**不是**对端真实公网地址）
     pub public_address: Option<String>,
     pub online: bool,
     /// 会话状态码（`0x0326` 原值，便于核对）
@@ -85,6 +88,12 @@ pub struct RadminPeer {
     pub channel: Option<String>,
     /// 会话端点「本地 -> 远端」
     pub session_remote: Option<String>,
+    /// 从 `0x01e9` 端点右侧解析出的对端地址（直连时为对端真实公网 IP）
+    pub real_ip: Option<String>,
+    /// 对端端口（`0x01e9` 端点右侧的端口）
+    pub real_port: Option<u32>,
+    /// 真实地址的性质：直连 / 中继 / Teredo / 未知
+    pub real_kind: Option<String>,
     /// 成员侧服务端口（`0x0330`，如 4899 / 25565）
     pub service_port: Option<u32>,
 }
@@ -293,6 +302,7 @@ struct MemberDetail {
     ipv6: Option<String>,
     public_address: Option<String>,
     state_code: u32,
+    channel_code: Option<u32>,
     session_remote: Option<String>,
     service_port: Option<u32>,
 }
@@ -304,9 +314,17 @@ fn decode_member_detail(records: &[Record]) -> Result<Option<(u64, MemberDetail)
 
     let sessions = messages_of(records, MSG_SESSION)?;
     let mut session_remote = None;
+    let mut channel_code = None;
     for session in &sessions {
-        if let Some(text) = find_string(session, F_ENDPOINT_TEXT) {
-            session_remote = Some(text);
+        if channel_code.is_none() {
+            channel_code = find_u32(session, F_SESSION_CHANNEL);
+        }
+        if session_remote.is_none() {
+            if let Some(text) = find_string(session, F_ENDPOINT_TEXT) {
+                session_remote = Some(text);
+            }
+        }
+        if session_remote.is_some() && channel_code.is_some() {
             break;
         }
     }
@@ -331,17 +349,71 @@ fn decode_member_detail(records: &[Record]) -> Result<Option<(u64, MemberDetail)
             ipv6: ipv6_of(records),
             public_address: find_string(records, F_PUBLIC_ADDRESS),
             state_code: find_u32(records, F_SESSION_STATE).unwrap_or(0),
+            channel_code,
             session_remote,
             service_port: find_u32(records, F_SERVICE_PORT).filter(|port| *port != 0),
         },
     )))
 }
 
-fn channel_of(state_code: u32) -> Option<String> {
-    match state_code {
-        0 => None,
-        5 => Some("UDP".to_string()),
-        _ => Some("TCP".to_string()),
+fn channel_of(state_code: u32, channel_code: Option<u32>) -> Option<String> {
+    // 0x01e8：0 = TCP、2 = UDP、3 = TCP 中继、4 = UDP；缺失时退回按 0x0326 推断
+    match channel_code {
+        Some(0) | Some(1) => Some("TCP".to_string()),
+        Some(2) | Some(4) => Some("UDP".to_string()),
+        Some(3) => Some("中继".to_string()),
+        _ => match state_code {
+            0 => None,
+            5 => Some("UDP".to_string()),
+            _ => Some("TCP".to_string()),
+        },
+    }
+}
+
+/// 拆 `0x01e9` 的「本地:端口 -> 远端:端口」，返回右侧的（主机, 端口）。
+fn split_remote_endpoint(text: &str) -> Option<(String, Option<u32>)> {
+    let remote = text
+        .split_once("->")
+        .map(|(_, right)| right)
+        .unwrap_or(text)
+        .trim();
+    if remote.is_empty() {
+        return None;
+    }
+    if let Some((host, port_text)) = remote.rsplit_once(':') {
+        if port_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            // 只有「主机部分本身是合法地址」时才认为最后一段是端口，
+            // 否则会把不带端口的 IPv6 最后一组误当成端口
+            if let Ok(port) = port_text.parse::<u32>() {
+                if port <= u16::MAX as u32 && host.parse::<std::net::IpAddr>().is_ok() {
+                    return Some((host.trim().to_string(), Some(port)));
+                }
+            }
+        }
+    }
+    Some((
+        remote
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string(),
+        None,
+    ))
+}
+
+/// 端点右侧地址的性质：直连的真实公网 IP / 中继服务器 / Teredo 隧道。
+fn real_kind(host: &str, channel_code: Option<u32>) -> &'static str {
+    let lower = host.to_ascii_lowercase();
+    if lower.starts_with("2001:0:") {
+        "Teredo"
+    } else if host == "0.0.0.0" || host == "::" {
+        "未知"
+    } else if channel_code == Some(3) {
+        "中继"
+    } else if host.parse::<std::net::IpAddr>().is_ok() {
+        "直连"
+    } else {
+        "未知"
     }
 }
 
@@ -356,6 +428,16 @@ fn decode_network(
         };
         let detail = directory.get(&id).cloned().unwrap_or_default();
         let ipv4 = detail.ipv4.clone();
+        let (real_ip, real_port) = match detail.session_remote.as_deref() {
+            Some(text) => match split_remote_endpoint(text) {
+                Some((host, port)) => (Some(host), port),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+        let real_kind = real_ip
+            .as_deref()
+            .map(|host| real_kind(host, detail.channel_code).to_string());
         peers.push(RadminPeer {
             rid: id.to_string(),
             name: detail.name.unwrap_or_else(|| "未知成员".to_string()),
@@ -371,8 +453,11 @@ fn decode_network(
             public_address: detail.public_address,
             online: detail.state_code != 0,
             state_code: detail.state_code,
-            channel: channel_of(detail.state_code),
+            channel: channel_of(detail.state_code, detail.channel_code),
             session_remote: detail.session_remote,
+            real_ip,
+            real_port,
+            real_kind,
             service_port: detail.service_port,
         });
     }
@@ -496,6 +581,16 @@ pub fn read_snapshot() -> Result<RadminSnapshot, String> {
 
 /// 发送 `CJoinNetwork`（msg id = 3）并读取回执。
 pub fn join_network(name: &str, password: &str, flag: u32) -> Result<JoinReply, String> {
+    join_network_with_timeout(name, password, flag, Duration::from_secs(6))
+}
+
+/// 同 `join_network`，但可指定等待回执的时长（批量加网时用更短的超时）。
+pub fn join_network_with_timeout(
+    name: &str,
+    password: &str,
+    flag: u32,
+    reply_timeout: Duration,
+) -> Result<JoinReply, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("网络名不能为空".into());
@@ -518,7 +613,7 @@ pub fn join_network(name: &str, password: &str, flag: u32) -> Result<JoinReply, 
     pipe.write_frame(&payload)?;
 
     // 连接后服务端会先推状态帧，回执夹在其中，按截止时间持续读
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + reply_timeout;
     while Instant::now() < deadline {
         let frame = match pipe.read_frame(deadline) {
             Ok(frame) => frame,
@@ -550,11 +645,65 @@ fn describe_result(code: u32) -> &'static str {
     match code {
         0 => "已加入网络",
         1002 => "网络名不存在（标志位非 0）",
+        1004 => "Radmin VPN 总开关处于关闭状态",
         1012 => "网络名不存在或拼写不符，需与网络名完全一致（含空格）",
         1015 => "参数组合无效",
         1017 => "网络名为空",
+        1018 => "已经加入该网络",
         _ => "未知返回码",
     }
+}
+
+// ===== 批量加网（Minecraft 中文 1-14） =====
+
+/// `Minecraft [中文 N]`，N = 1..=14
+pub fn minecraft_network_names() -> Vec<String> {
+    (1..=14).map(|index| format!("Minecraft [中文 {index}]")).collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchJoinResult {
+    pub name: String,
+    pub code: u32,
+    pub ok: bool,
+    pub message: String,
+    /// true 表示本来就在网络里（服务端返回 1018）
+    pub already: bool,
+}
+
+/// 依次加入 `Minecraft [中文 1]` … `Minecraft [中文 14]`。
+///
+/// 每个网络单独开一条管道连接（与单次加网完全一致），失败不会中断后续网络。
+pub fn join_minecraft_networks(password: &str, flag: u32) -> Vec<BatchJoinResult> {
+    let mut results = Vec::new();
+    for name in minecraft_network_names() {
+        let result = match join_network_with_timeout(&name, password, flag, Duration::from_secs(4)) {
+            Ok(reply) => {
+                let already = reply.code == 1018;
+                BatchJoinResult {
+                    name: name.clone(),
+                    code: reply.code,
+                    ok: reply.code == 0 || already,
+                    message: if already {
+                        "已在网络内".to_string()
+                    } else {
+                        reply.message
+                    },
+                    already,
+                }
+            }
+            Err(error) => BatchJoinResult {
+                name: name.clone(),
+                code: u32::MAX,
+                ok: false,
+                message: error,
+                already: false,
+            },
+        };
+        results.push(result);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    results
 }
 
 fn next_request_id() -> u32 {

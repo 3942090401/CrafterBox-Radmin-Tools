@@ -1,5 +1,5 @@
 import "./lan-radmin.css";
-import { toast } from "../ui.js";
+import { confirmDialog, toast } from "../ui.js";
 
 const { invoke } = window.__TAURI__.core;
 
@@ -7,7 +7,7 @@ const REFRESH_MS = 20000;
 const PING_LIMIT = 160;
 const FILTER_DELAY = 60;
 
-const COLUMNS = ["名称", "RID", "虚拟IP4", "虚拟IP6", "公网地址", "Ping", "通道", "状态"];
+const COLUMNS = ["名称", "RID", "虚拟IP4", "虚拟IP6", "真实IP", "Ping", "通道", "状态"];
 
 export async function render(container) {
   container.classList.add("rm-page");
@@ -41,6 +41,7 @@ export async function render(container) {
         <input id="rm-join-pass" type="text" autocomplete="off" spellcheck="false" placeholder="访问码（可选）" />
         <input id="rm-join-flag" class="rm-join-flag" type="text" autocomplete="off" spellcheck="false" value="0" title="标志位 0x033F，正常加网填 0" />
         <button id="rm-join-submit">加入</button>
+        <button id="rm-join-mc" class="rm-join-mc" title="依次加入 Minecraft [中文 1] ~ [中文 14]">MC 1-14</button>
         <button id="rm-join-cancel">取消</button>
       </div>
     </div>
@@ -53,7 +54,7 @@ export async function render(container) {
       </div>
       <div class="rm-toolbar">
         <input class="rm-search" id="rm-search" type="text" autocomplete="off" spellcheck="false"
-               placeholder="搜索名称 / RID / 虚拟 IP / 公网地址" />
+               placeholder="搜索名称 / RID / 虚拟 IP / 真实 IP" />
         <label class="rm-check"><input type="checkbox" id="rm-online-only" />只看在线</label>
         <button class="rm-ping-btn" id="rm-ping">测延迟</button>
       </div>
@@ -262,7 +263,22 @@ export async function render(container) {
       const row = document.createElement("div");
       row.className = "rm-row rm-body-row";
       row.classList.toggle("is-offline", !peer.online);
-      row.title = [peer.name, `${peer.ipv4 || "—"}/${peer.ipv4_prefix ?? 8}`, peer.session_remote]
+      const realIp = peer.real_ip || "—";
+      const realTip = [
+        peer.real_kind ? `类型：${peer.real_kind}` : null,
+        peer.real_port ? `端口：${peer.real_port}` : null,
+        peer.session_remote ? `端点：${peer.session_remote}` : null,
+        peer.public_address ? `云端节点：${peer.public_address}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      row.title = [
+        peer.name,
+        `${peer.ipv4 || "—"}/${peer.ipv4_prefix ?? 8}`,
+        realIp === "—" ? null : `真实 ${realIp}`,
+        peer.session_remote,
+      ]
         .filter(Boolean)
         .join("\n");
 
@@ -272,7 +288,7 @@ export async function render(container) {
         { text: peer.rid || "—" },
         { text: peer.ipv4 || "—", prefix: peer.ipv4 ? `/${peer.ipv4_prefix ?? 8}` : null },
         { text: peer.ipv6 || "—" },
-        { text: peer.public_address || "—" },
+        { text: realIp, cls: "rm-cell-real", tip: realTip },
         { text: pingText, cls: pingClass(pingText) },
         { text: peer.channel || "—" },
         { text: peer.online ? "在线" : "离线", cls: peer.online ? "rm-online" : "rm-offline" },
@@ -291,7 +307,7 @@ export async function render(container) {
         }
         if (def.text && def.text !== "—") {
           const value = def.prefix ? `${def.text}${def.prefix}` : def.text;
-          cell.title = `点击复制：${value}`;
+          cell.title = def.tip ? `点击复制：${value}\n${def.tip}` : `点击复制：${value}`;
           cell.addEventListener("click", (event) => {
             event.stopPropagation();
             void copyCell(cell, value);
@@ -303,7 +319,7 @@ export async function render(container) {
       rowEntries.push({
         node: row,
         online: Boolean(peer.online),
-        key: [peer.name, peer.rid, peer.ipv4, peer.ipv6, peer.public_address]
+        key: [peer.name, peer.rid, peer.ipv4, peer.ipv6, peer.real_ip, peer.public_address]
           .filter(Boolean)
           .join(" ")
           .toLocaleLowerCase(),
@@ -451,6 +467,50 @@ export async function render(container) {
     }
   }
 
+  // 一键加入 Minecraft [中文 1] ~ [中文 14]
+  async function joinMinecraft() {
+    const confirmed = await confirmDialog(
+      "将依次加入 Minecraft [中文 1] ~ [中文 14] 共 14 个网络，每个都单独走一次管道连接。继续？",
+      "一键加入 MC 中文网络",
+    );
+    if (!confirmed) return;
+    const mcBtn = $("rm-join-mc");
+    const submitBtn = $("rm-join-submit");
+    const password = joinPass.value;
+    mcBtn.disabled = true;
+    submitBtn.disabled = true;
+    mcBtn.textContent = "加入中…";
+    try {
+      const results = await invoke("join_minecraft_networks", { password, flag: 0 });
+      const okList = results.filter((item) => item.ok);
+      const joined = okList.filter((item) => !item.already).length;
+      const already = okList.length - joined;
+      const failed = results.filter((item) => !item.ok);
+      const parts = [`新加入 ${joined}`];
+      if (already) parts.push(`已在内 ${already}`);
+      if (failed.length) parts.push(`失败 ${failed.length}`);
+      toast(`MC 中文 1-14：${parts.join(" · ")}`, failed.length ? "error" : "success", 4200);
+      if (failed.length) {
+        console.warn("批量加网失败明细", failed);
+        toast(
+          failed
+            .slice(0, 3)
+            .map((item) => `${item.name}：${item.message}`)
+            .join("\n"),
+          "error",
+          6000,
+        );
+      }
+      await loadSnapshot({ ping: true });
+    } catch (error) {
+      toast(String(error), "error", 3600);
+    } finally {
+      mcBtn.disabled = false;
+      submitBtn.disabled = false;
+      mcBtn.textContent = "MC 1-14";
+    }
+  }
+
   refreshBtn.addEventListener("click", () => {
     pinged = false;
     pingMap.clear();
@@ -503,6 +563,7 @@ export async function render(container) {
     joinFlag.value = "0";
   });
   $("rm-join-submit").addEventListener("click", () => void submitJoin());
+  $("rm-join-mc").addEventListener("click", () => void joinMinecraft());
   for (const input of [joinName, joinPass, joinFlag]) {
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") void submitJoin();
@@ -511,6 +572,13 @@ export async function render(container) {
   }
 
   await loadSnapshot();
+
+  // 首页「加入网络」按钮跳过来时自动展开加网表单
+  if (window.__rmOpenJoin) {
+    window.__rmOpenJoin = false;
+    toggleJoin(true);
+  }
+
   void runPing(true);
 
   const timer = setInterval(() => {

@@ -55,6 +55,22 @@ pub async fn join_radmin_network(
         .map_err(|error| format!("加网任务失败：{error}"))?
 }
 
+/// 一键加入 `Minecraft [中文 1]` … `Minecraft [中文 14]`，返回每个网络的结果。
+#[tauri::command]
+pub async fn join_minecraft_networks(
+    password: Option<String>,
+    flag: Option<u32>,
+) -> Result<Vec<crate::networks::BatchJoinResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::networks::join_minecraft_networks(
+            password.as_deref().unwrap_or(""),
+            flag.unwrap_or(0),
+        )
+    })
+    .await
+    .map_err(|error| format!("批量加网任务失败：{error}"))
+}
+
 /// 批量 ICMP 测延迟，返回 虚拟IP -> 毫秒。
 #[tauri::command]
 pub async fn ping_radmin_peers(

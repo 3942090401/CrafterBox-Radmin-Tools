@@ -391,6 +391,25 @@ pub fn apply_account(account: &RadminAccount) -> Result<String, String> {
                 vtype: REG_QWORD,
             },
         )?;
+        // IPv4 存 REG_DWORD（值即网络序 u32），IPv6 存 REG_BINARY 16 字节裸地址
+        if let Some(address) = parse_ipv4(&account.ipv4)? {
+            write_account_registry_value(
+                "IPv4",
+                RegValue {
+                    bytes: u32::from_be_bytes(address.octets()).to_le_bytes().to_vec(),
+                    vtype: REG_DWORD,
+                },
+            )?;
+        }
+        if let Some(address) = parse_ipv6(&account.ipv6)? {
+            write_account_registry_value(
+                "IPv6",
+                RegValue {
+                    bytes: address.octets().to_vec(),
+                    vtype: REG_BINARY,
+                },
+            )?;
+        }
         system_registry::write_server_password(crate::config::RegistryValueSnapshot {
             name: "ServerPassword".to_string(),
             value_type: REG_BINARY as u32,
@@ -399,7 +418,46 @@ pub fn apply_account(account: &RadminAccount) -> Result<String, String> {
     })();
     start_service();
     restore_result?;
-    Ok("已恢复该账号的 Alias、RID 和 ServerPassword".to_string())
+    Ok("已恢复该账号的 Alias、RID、IPv4、IPv6 和 ServerPassword".to_string())
+}
+
+/// 账号里的 IPv4 允许带 /前缀 或空白，解析失败即报错（不静默跳过，避免"切换了但没换 IP"）。
+fn parse_ipv4(raw: &str) -> Result<Option<std::net::Ipv4Addr>, String> {
+    let text = raw.split('/').next().unwrap_or("").trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse::<std::net::Ipv4Addr>()
+        .map(Some)
+        .map_err(|_| format!("账号 IPv4 无法解析：{raw}"))
+}
+
+/// 账号里的 IPv6 可能是从网卡读到的多地址串，取第一个合法地址；含 zone（%）的先剥掉。
+fn parse_ipv6(raw: &str) -> Result<Option<std::net::Ipv6Addr>, String> {
+    let mut candidates = Vec::new();
+    for part in raw.split(',') {
+        let text = part.split('/').next().unwrap_or("").trim();
+        let text = text.split('%').next().unwrap_or("").trim();
+        if !text.is_empty() {
+            candidates.push(text);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed: Vec<std::net::Ipv6Addr> = candidates
+        .iter()
+        .filter_map(|text| text.parse::<std::net::Ipv6Addr>().ok())
+        .collect();
+    if parsed.is_empty() {
+        return Err(format!("账号 IPv6 无法解析：{raw}"));
+    }
+    // 链路本地 fe80:: 不是 Radmin 用的地址，优先取全局地址
+    parsed.sort_by_key(|address| {
+        let is_link_local = (address.segments()[0] & 0xffc0) == 0xfe80;
+        (is_link_local, address.is_loopback())
+    });
+    Ok(Some(parsed[0]))
 }
 
 fn write_account_registry_value(name: &str, value: RegValue) -> Result<(), String> {
