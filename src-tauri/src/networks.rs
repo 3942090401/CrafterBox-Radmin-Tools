@@ -88,12 +88,16 @@ pub struct RadminPeer {
     pub channel: Option<String>,
     /// 会话端点「本地 -> 远端」
     pub session_remote: Option<String>,
-    /// 从 `0x01e9` 端点右侧解析出的对端地址（直连时为对端真实公网 IP）
+    /// 从 `0x01e9` 端点右侧解析出的对端真实公网 IPv4（直连或 Teredo 解码，绝不含 IPv6）
     pub real_ip: Option<String>,
     /// 对端端口（`0x01e9` 端点右侧的端口）
     pub real_port: Option<u32>,
-    /// 真实地址的性质：直连 / 中继 / Teredo / 未知
+    /// 真实地址的性质：直连 / Teredo（中继时不填，走 relay_ip）
     pub real_kind: Option<String>,
+    /// 中继服务器地址（`0x01e8`=3 时端点右侧的 IPv4）
+    pub relay_ip: Option<String>,
+    /// 中继服务器端口
+    pub relay_port: Option<u32>,
     /// 成员侧服务端口（`0x0330`，如 4899 / 25565）
     pub service_port: Option<u32>,
 }
@@ -401,20 +405,25 @@ fn split_remote_endpoint(text: &str) -> Option<(String, Option<u32>)> {
     ))
 }
 
-/// 端点右侧地址的性质：直连的真实公网 IP / 中继服务器 / Teredo 隧道。
-fn real_kind(host: &str, channel_code: Option<u32>) -> &'static str {
-    let lower = host.to_ascii_lowercase();
-    if lower.starts_with("2001:0:") {
-        "Teredo"
-    } else if host == "0.0.0.0" || host == "::" {
-        "未知"
-    } else if channel_code == Some(3) {
-        "中继"
-    } else if host.parse::<std::net::IpAddr>().is_ok() {
-        "直连"
-    } else {
-        "未知"
+/// Teredo 地址（2001:0::/32）末 8 字节解码出被混淆的端口与 IPv4：
+/// 混淆端口 = 原值 XOR 0xFFFF，混淆地址 = 原值 XOR 0xFFFFFFFF。
+fn decode_teredo(host: &str) -> Option<(String, u32)> {
+    let addr = host.parse::<std::net::Ipv6Addr>().ok()?;
+    let octets = addr.octets();
+    if octets[8] != 0x80 {
+        return None;
     }
+    let port = u16::from_be_bytes([octets[10], octets[11]]) ^ 0xFFFF;
+    let ipv4 = std::net::Ipv4Addr::new(
+        octets[12] ^ 0xFF,
+        octets[13] ^ 0xFF,
+        octets[14] ^ 0xFF,
+        octets[15] ^ 0xFF,
+    );
+    if ipv4.is_unspecified() || ipv4.is_broadcast() {
+        return None;
+    }
+    Some((ipv4.to_string(), u32::from(port)))
 }
 
 fn decode_network(
@@ -428,16 +437,37 @@ fn decode_network(
         };
         let detail = directory.get(&id).cloned().unwrap_or_default();
         let ipv4 = detail.ipv4.clone();
-        let (real_ip, real_port) = match detail.session_remote.as_deref() {
-            Some(text) => match split_remote_endpoint(text) {
-                Some((host, port)) => (Some(host), port),
-                None => (None, None),
-            },
-            None => (None, None),
-        };
-        let real_kind = real_ip
-            .as_deref()
-            .map(|host| real_kind(host, detail.channel_code).to_string());
+        // 端点右侧地址三分类：直连 IPv4 → real_ip；中继服务器 → relay_ip；
+        // Teredo 隧道地址解码出内嵌 IPv4 → real_ip；IPv6 直连不进列，信息留在 tooltip。
+        let (mut real_ip, mut real_port, mut real_kind) = (None, None, None);
+        let (mut relay_ip, mut relay_port) = (None, None);
+        if let Some(text) = detail.session_remote.as_deref() {
+            if let Some((host, port)) = split_remote_endpoint(text) {
+                let lower = host.to_ascii_lowercase();
+                if lower.starts_with("2001:0:") {
+                    match decode_teredo(&host) {
+                        Some((v4, p4)) => {
+                            real_ip = Some(v4);
+                            real_port = Some(p4);
+                        }
+                        None => {
+                            real_kind = Some("Teredo".to_string());
+                        }
+                    }
+                } else if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+                    if detail.channel_code == Some(3) {
+                        if v4 != std::net::Ipv4Addr::UNSPECIFIED {
+                            relay_ip = Some(host);
+                            relay_port = port;
+                        }
+                    } else if v4 != std::net::Ipv4Addr::UNSPECIFIED {
+                        real_ip = Some(host);
+                        real_port = port;
+                        real_kind = Some("直连".to_string());
+                    }
+                }
+            }
+        }
         peers.push(RadminPeer {
             rid: id.to_string(),
             name: detail.name.unwrap_or_else(|| "未知成员".to_string()),
@@ -458,6 +488,8 @@ fn decode_network(
             real_ip,
             real_port,
             real_kind,
+            relay_ip,
+            relay_port,
             service_port: detail.service_port,
         });
     }
@@ -1073,6 +1105,19 @@ mod tests {
     #[test]
     fn rejects_truncated_tlv() {
         assert!(parse_records(&[0, 0, 0, 3, 1]).is_err());
+    }
+
+    /// Teredo 地址内嵌的端口与 IPv4 应被正确解码。
+    #[test]
+    fn decodes_teredo_embedded_ipv4() {
+        // 构造：2001:0:4137:9e50:8000:72e1:8c5c:2c9a
+        // 端口 = 0x72e1 XOR 0xFFFF = 36126；地址 = 0x8c5c2c9a XOR 0xFFFFFFFF = 115.163.211.101
+        let (ip, port) =
+            decode_teredo("2001:0:4137:9e50:8000:72e1:8c5c:2c9a").expect("应能解码");
+        assert_eq!(ip, "115.163.211.101");
+        assert_eq!(port, 36126);
+        // 非 Teredo 地址不参与解码
+        assert!(decode_teredo("2409:8a5e:579a:1aa8:719f:f504:92b6:5232").is_none());
     }
 
     /// 真实管道自检：`cargo test live_snapshot -- --nocapture --ignored`

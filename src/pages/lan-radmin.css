@@ -260,8 +260,8 @@
 .rm-row {
   display: grid;
   grid-template-columns:
-    minmax(96px, 1.5fr) 62px minmax(80px, 0.85fr) minmax(92px, 1fr)
-    minmax(108px, 1.05fr) 46px 34px 28px;
+    minmax(96px, 1.5fr) 62px minmax(84px, 0.9fr) minmax(92px, 1fr)
+    minmax(88px, 0.95fr) 46px 34px 28px;
   align-items: center;
   gap: 5px;
   min-width: 592px;

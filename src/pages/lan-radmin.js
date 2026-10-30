@@ -7,7 +7,7 @@ const REFRESH_MS = 20000;
 const PING_LIMIT = 160;
 const FILTER_DELAY = 60;
 
-const COLUMNS = ["名称", "RID", "虚拟IP4", "虚拟IP6", "真实IP", "Ping", "通道", "状态"];
+const COLUMNS = ["名称", "RID", "虚拟IP", "真实IP", "中转IP", "Ping", "通道", "状态"];
 
 export async function render(container) {
   container.classList.add("rm-page");
@@ -54,7 +54,7 @@ export async function render(container) {
       </div>
       <div class="rm-toolbar">
         <input class="rm-search" id="rm-search" type="text" autocomplete="off" spellcheck="false"
-               placeholder="搜索名称 / RID / 虚拟 IP / 真实 IP" />
+               placeholder="搜索名称 / RID / 虚拟 IP / 真实 IP / 中转 IP" />
         <label class="rm-check"><input type="checkbox" id="rm-online-only" />只看在线</label>
         <button class="rm-ping-btn" id="rm-ping">测延迟</button>
       </div>
@@ -264,6 +264,7 @@ export async function render(container) {
       row.className = "rm-row rm-body-row";
       row.classList.toggle("is-offline", !peer.online);
       const realIp = peer.real_ip || "—";
+      const relayIp = peer.relay_ip || "—";
       const realTip = [
         peer.real_kind ? `类型：${peer.real_kind}` : null,
         peer.real_port ? `端口：${peer.real_port}` : null,
@@ -272,11 +273,19 @@ export async function render(container) {
       ]
         .filter(Boolean)
         .join("\n");
+      const relayTip = [
+        peer.relay_port ? `端口：${peer.relay_port}` : null,
+        peer.session_remote ? `端点：${peer.session_remote}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
 
       row.title = [
         peer.name,
-        `${peer.ipv4 || "—"}/${peer.ipv4_prefix ?? 8}`,
+        peer.ipv4 ? `虚拟 ${peer.ipv4}/${peer.ipv4_prefix ?? 8}` : null,
+        peer.ipv6 ? `虚拟6 ${peer.ipv6}` : null,
         realIp === "—" ? null : `真实 ${realIp}`,
+        relayIp === "—" ? null : `中转 ${relayIp}`,
         peer.session_remote,
       ]
         .filter(Boolean)
@@ -287,8 +296,8 @@ export async function render(container) {
         { text: peer.name || "—", cls: "rm-cell-name" },
         { text: peer.rid || "—" },
         { text: peer.ipv4 || "—", prefix: peer.ipv4 ? `/${peer.ipv4_prefix ?? 8}` : null },
-        { text: peer.ipv6 || "—" },
         { text: realIp, cls: "rm-cell-real", tip: realTip },
+        { text: relayIp, cls: "rm-cell-relay", tip: relayTip },
         { text: pingText, cls: pingClass(pingText) },
         { text: peer.channel || "—" },
         { text: peer.online ? "在线" : "离线", cls: peer.online ? "rm-online" : "rm-offline" },
@@ -319,7 +328,7 @@ export async function render(container) {
       rowEntries.push({
         node: row,
         online: Boolean(peer.online),
-        key: [peer.name, peer.rid, peer.ipv4, peer.ipv6, peer.real_ip, peer.public_address]
+        key: [peer.name, peer.rid, peer.ipv4, peer.ipv6, peer.real_ip, peer.relay_ip]
           .filter(Boolean)
           .join(" ")
           .toLocaleLowerCase(),
